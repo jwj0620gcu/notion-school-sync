@@ -148,14 +148,17 @@ def _paragraph(text: str) -> dict:
 # ─── 노션 페이지 기존 블록 전체 삭제 ─────────────────────────────────────────
 
 def clear_page_blocks(page_id: str):
-    """페이지 안의 블록을 전부 삭제"""
+    """페이지 안의 블록을 전부 삭제 (일부 실패해도 계속 진행)"""
     cursor = None
     while True:
         resp = notion.blocks.children.list(
             block_id=page_id, start_cursor=cursor, page_size=100
         )
         for block in resp["results"]:
-            notion.blocks.delete(block_id=block["id"])
+            try:
+                notion.blocks.delete(block_id=block["id"])
+            except Exception:
+                pass  # 이미 삭제됐거나 권한 없는 블록은 스킵
         if not resp.get("has_more"):
             break
         cursor = resp["next_cursor"]

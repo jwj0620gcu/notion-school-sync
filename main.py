@@ -52,7 +52,7 @@ SCHOOL_API_KEY = os.getenv("SCHOOL_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 API_BASE      = "https://api.1000.school"
-GEMINI_MODEL  = "gemini-2.0-flash"
+GEMINI_MODEL  = "gemini-2.5-flash"
 GEMINI_URL    = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"
@@ -448,6 +448,9 @@ def watch(interval: int = 600):
     last_sync_date         = None
     last_reverse_sync_at   = None
     last_reverse_sync_hash = None   # 마지막으로 역방향 동기화된 1000.school 내용 해시
+    last_tracked_date      = None   # 날짜 변경 감지용
+
+    REVERSE_SYNC_INTERVAL = 600  # 10분 (초)
 
     while True:
         try:
@@ -455,18 +458,27 @@ def watch(interval: int = 600):
             today = effective_date()
             title = today.strftime("%Y-%m-%d")
 
+            # ── 날짜가 바뀌면 상태 리셋 ──────────────────────────────────────
+            # last_edited를 리셋하지 않으면 새 날짜 페이지를 매 루프마다 업로드 시도함
+            if today != last_tracked_date:
+                last_edited            = None
+                last_reverse_sync_hash = None
+                last_tracked_date      = today
+
+            # ── 오늘 페이지 한 번만 조회 (루프당 API 1번으로 절약) ───────────
+            page_id = find_today_child_page(NOTION_PAGE_ID)
+
             # ── 오전 9시 이후 하루 1번: 오늘 날짜 페이지 자동 생성 ──────────
             if now.hour >= DAY_START_HOUR and last_page_created != today:
-                if not find_today_child_page(NOTION_PAGE_ID):
+                if not page_id:
                     print(f"[{_now()}] 📄 오전 9시 지남 → '{title}' 노션 페이지 자동 생성 중...", flush=True)
-                    new_id = create_today_notion_page(title)
-                    if new_id:
+                    page_id = create_today_notion_page(title)
+                    if page_id:
                         print(f"[{_now()}] ✅ '{title}' 페이지 생성 완료", flush=True)
                 last_page_created = today
 
             # ── 오전 9시 이후 하루 1번: 전날 스니펫 최종본 → 노션 반영 ────────
             if now.hour >= DAY_START_HOUR and last_sync_date != today:
-                from datetime import timedelta
                 yesterday = (now - timedelta(days=1)).date().strftime("%Y-%m-%d")
                 print(f"[{_now()}] 🔄 전날({yesterday}) 스니펫 최종본 → 노션 반영 중...", flush=True)
                 try:
@@ -483,12 +495,10 @@ def watch(interval: int = 600):
                     report_module.run()
                     last_report_date = today
                     print(f"[{_now()}] ✅ 리포트 갱신 완료", flush=True)
-                except Exception as re:
-                    print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re}", flush=True)
+                except Exception as re_err:
+                    print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re_err}", flush=True)
 
             # ── 노션 변경 감지 후 Gemini 다듬기 + 스니펫 업로드 ──────────────
-            page_id = find_today_child_page(NOTION_PAGE_ID)
-
             if not page_id:
                 print(f"[{_now()}] ⏳ '{title}' 페이지 없음. 대기 중...", flush=True)
             else:
@@ -500,22 +510,16 @@ def watch(interval: int = 600):
                     did_upload = run_once(polish=True)
                     if did_upload:
                         last_edited = edited
+                        # 업로드한 내용 해시 저장 → 역방향 동기화 루프 방지
+                        try:
+                            last_reverse_sync_hash = _content_hash(get_notion_content(page_id))
+                        except Exception:
+                            pass
                 else:
                     print(f"[{_now()}] ✓ 변경 없음", flush=True)
 
-                # 업로드 성공 시: 해시 저장 (역방향 동기화 루프 방지)
-                if did_upload:
-                    try:
-                        uploaded_content = get_notion_content(page_id)
-                        last_reverse_sync_hash = _content_hash(uploaded_content)
-                    except Exception:
-                        pass
-
             # ── 10분마다: 1000.school → 노션 역방향 동기화 ─────────────────
-            # 해시 비교 방식: 1000.school 내용(+피드백)이 실제로 바뀐 경우만 노션 덮어씀
-            # → 노션 업로드 직후엔 해시 같아서 스킵 (깜빡임 방지)
-            # → 피드백 추가·1000.school 직접 수정 시엔 해시 달라져서 반영
-            REVERSE_SYNC_INTERVAL = 600  # 10분 (초)
+            # 해시 비교로 실제 변경된 경우만 덮어씀 (깜빡임 방지)
             now_ts = datetime.now()
             if last_reverse_sync_at is None or \
                (now_ts - last_reverse_sync_at).total_seconds() >= REVERSE_SYNC_INTERVAL:
@@ -531,19 +535,16 @@ def watch(interval: int = 600):
                         school_feedback = school_snippet.get("feedback") or ""
                         if isinstance(school_feedback, dict):
                             school_feedback = json.dumps(school_feedback, ensure_ascii=False)
-                        # content + feedback 합산 해시 → 피드백 변경도 감지
                         school_hash = _content_hash(school_content + school_feedback)
 
                         if school_hash != last_reverse_sync_hash:
-                            # 내용이 달라졌을 때만 노션 업데이트
                             print(f"[{_now()}] 🔁 1000.school 변경 감지 → 노션 업데이트 중... ({title})", flush=True)
                             sync_module.main(update_existing=True, only_date=title)
                             last_reverse_sync_hash = school_hash
                             print(f"[{_now()}] ✅ 역방향 동기화 완료 ({title})", flush=True)
-                            # last_edited 갱신 → 다음 루프에서 업로드 루프 방지
-                            page_id_tmp = find_today_child_page(NOTION_PAGE_ID)
-                            if page_id_tmp:
-                                last_edited = get_page_last_edited(page_id_tmp)
+                            # 역방향 동기화 후 last_edited 갱신 → 순방향 업로드 루프 방지
+                            if page_id:
+                                last_edited = get_page_last_edited(page_id)
                         else:
                             print(f"[{_now()}] ✓ 1000.school 내용 동일 → 역방향 동기화 스킵", flush=True)
                     else:

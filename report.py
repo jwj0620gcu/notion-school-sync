@@ -15,8 +15,11 @@ import os
 import json
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from notion_client import Client
+
+KST = ZoneInfo("Asia/Seoul")
 
 import db
 
@@ -83,7 +86,8 @@ def build_gemini_summary(snippets: list[dict]) -> str:
 
     priority_rate = db.calc_priority_achievement(snippets)
     lines.append(f"\n[통계] 우선순위 달성률: {priority_rate}%")
-    lines.append(f"[통계] 총 스니펫: {len(snippets)}개 / 기간: {snippets[0]['date']} ~ {snippets[-1]['date']}")
+    if snippets:
+        lines.append(f"[통계] 총 스니펫: {len(snippets)}개 / 기간: {snippets[0]['date']} ~ {snippets[-1]['date']}")
 
     return "\n\n".join(lines)
 
@@ -172,9 +176,14 @@ def analyze_with_gemini(prompt: str) -> dict:
     resp = requests.post(url, json=payload, timeout=60)
     resp.raise_for_status()
 
-    raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    # JSON 파싱
+    data = resp.json()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise ValueError(f"Gemini 응답에 candidates 없음: {data}")
+    raw = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
     raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+    if not raw:
+        raise ValueError("Gemini 응답 텍스트가 비어있음")
     return json.loads(raw)
 
 
@@ -253,7 +262,7 @@ def _bullet(content: str) -> dict:
 
 def build_report_blocks(analysis: dict, snippets: list[dict], priority_rate: float) -> list[dict]:
     """분석 결과 → 노션 블록 리스트"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     blocks = []
 
     # ── 헤더
@@ -353,14 +362,17 @@ def find_or_create_report_page() -> str:
 
 
 def clear_page_blocks(page_id: str):
-    """페이지 기존 블록 전체 삭제"""
+    """페이지 기존 블록 전체 삭제 (일부 실패해도 계속 진행)"""
     cursor = None
     while True:
         resp = notion.blocks.children.list(
             block_id=page_id, start_cursor=cursor, page_size=100
         )
         for block in resp["results"]:
-            notion.blocks.delete(block_id=block["id"])
+            try:
+                notion.blocks.delete(block_id=block["id"])
+            except Exception:
+                pass  # 이미 삭제됐거나 권한 없는 블록은 스킵
         if not resp.get("has_more"):
             break
         cursor = resp["next_cursor"]
@@ -391,7 +403,10 @@ def run():
 
     # 3. Gemini 분석
     print("\n[2/4] Gemini 분석 중...")
-    snippets       = db.get_all_snippets()
+    snippets = db.get_all_snippets()
+    if not snippets:
+        print("   ⚠️  분석할 스니펫 없음 → 종료")
+        return
     priority_rate  = db.calc_priority_achievement(snippets)
     summary        = build_gemini_summary(snippets)
     prompt         = build_gemini_prompt(summary)
