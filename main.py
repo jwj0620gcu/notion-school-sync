@@ -182,19 +182,54 @@ def gemini_polish_content(raw_content: str, snippet_date: str) -> str:
 
     prompt = "\n".join([
         f"입력된 노션 데일리 메모를 바탕으로 {snippet_date}의 데일리 회고를 작성해라.",
-        "입력은 짧고 거칠 수 있지만, 과장하지 말고 입력에 없는 사실은 만들지 마라.",
-        "출력은 반드시 JSON 객체 하나만 반환해라.",
-        "태스크별로 '오늘 한 일 / 하이라이트 / 로우라이트 / 내일의 우선순위'를 각각 반복해서 쓰지 말아라.",
-        "반드시 하루 전체 기준으로 회고를 통합해서 작성해라.",
-        "하이라이트와 로우라이트는 하루에서 중요도가 높은 것만 1~3개 정도로 추려서 작성해라.",
-        "문체는 노션 데일리 기록에 맞게 간결하지만 의미 있게 작성해라.",
-        "각 필드는 모두 한국어 문자열로 작성해라.",
-        "입력에 없는 사실은 지어내지 말고, 추론이 필요하면 보수적으로 작성해라.",
-        "lowlight는 명확한 문제가 없으면 '특별한 로우라이트 없음'처럼 정직하게 작성해라.",
-        "team_value는 오늘 팀에 준 기여를 협업 관점에서 작성해라.",
-        "learning_or_note는 오늘의 배움이나 남길 말을 한두 문장으로 작성해라.",
-        "health_score는 1부터 10 사이의 정수로 작성해라.",
-        "JSON 키는 다음만 사용해라: today_work, purpose, highlight, lowlight, tomorrow_priority, team_value, learning_or_note, health_score",
+        "출력은 반드시 JSON 객체 하나만 반환해라. 입력에 없는 사실은 절대 지어내지 마라.",
+        "",
+        "### 필드별 작성 기준",
+        "",
+        "today_work (배열, 필수):",
+        "  - 오늘 수행한 작업을 항목별로 분리해서 배열로 반환해라.",
+        "  - 각 항목은 '무엇을 했는지 + 어느 정도까지 했는지'를 한 줄로 담아라.",
+        "  - 예: '인간본성의 과학적 이해 notebookLM 정리와 문제 풀이 (중요 개념 정리 및 오답 노트 보강)'",
+        "  - 너무 짧거나 뭉뚱그리지 말고, 맥락이 느껴지도록 구체적으로 작성해라.",
+        "",
+        "purpose (배열, 필수):",
+        "  - today_work 항목들의 수행 목적을 각각 1줄로 배열로 반환해라.",
+        "  - 단순 나열이 아니라 '왜 했는지'가 드러나도록 작성해라.",
+        "",
+        "highlight (배열, 1~3개):",
+        "  - 오늘 중 가장 의미 있었던 성과나 긍정적 순간을 추려서 배열로 반환해라.",
+        "  - 구체적인 결과나 변화가 드러나도록 작성해라.",
+        "  - 예: 'Daily Snippet 적용으로 작업 우선순위 및 집중 시간이 개선됨'",
+        "",
+        "lowlight (배열, 1~3개):",
+        "  - 아쉬웠거나 문제가 된 상황을 배열로 반환해라.",
+        "  - 단순 감상이 아니라 무엇이 문제였는지 구체적으로 작성해라.",
+        "  - 명확한 문제가 없으면 ['특별한 로우라이트 없음'] 으로 반환해라.",
+        "",
+        "tomorrow_priority (배열, 필수):",
+        "  - 내일 해야 할 일을 항목별로 배열로 반환해라.",
+        "  - 각 항목은 '영역: 구체적 행동 (세부 방법 또는 목표량)' 형식으로 작성해라.",
+        "  - 예: 'NotionAPI 개발: 소수점 처리 로직 버그 수정 및 리포트 엔드포인트 완료 (테스트 케이스 작성 포함)'",
+        "  - 막연한 계획이 아니라 실행 가능한 수준으로 구체화해라.",
+        "",
+        "team_value (배열, 필수):",
+        "  - 오늘 팀에 기여한 내용을 항목별로 배열로 반환해라.",
+        "  - 팀에 어떤 영향을 주었는지 결과 중심으로 작성해라.",
+        "",
+        "learning_or_note (문자열):",
+        "  - 오늘 새롭게 깨달은 점이나 남길 말을 1~2문장으로 작성해라.",
+        "  - 구체적인 경험에서 나온 인사이트여야 한다.",
+        "",
+        "health_score (정수, 1~10):",
+        "  - 오늘의 신체적·정신적 컨디션을 1~10으로 평가해라.",
+        "",
+        "health_reason (문자열):",
+        "  - health_score의 이유를 한 줄로 작성해라.",
+        "  - 예: '허리 통증으로 활동성 저하 → 스트레칭/운동 계획 필요'",
+        "",
+        "JSON 키는 다음만 사용해라: today_work, purpose, highlight, lowlight, tomorrow_priority, team_value, learning_or_note, health_score, health_reason",
+        "today_work, purpose, highlight, lowlight, tomorrow_priority, team_value 는 반드시 JSON 배열(array)로 반환해라.",
+        "learning_or_note, health_reason 은 문자열(string)로 반환해라.",
         "",
         "[노션 원문 시작]",
         raw_content,
@@ -239,31 +274,42 @@ def gemini_polish_content(raw_content: str, snippet_date: str) -> str:
 
     health = int(parsed.get("health_score", 5))
     health = max(1, min(10, health))
+    health_reason = parsed.get("health_reason", "")
+
+    def to_bullets(val) -> str:
+        """문자열 또는 배열을 '- 항목' 형태 여러 줄로 변환"""
+        if isinstance(val, list):
+            return "\n".join(f"- {item}" for item in val if item)
+        return f"- {val}" if val else ""
+
+    health_line = f"- {health}/10"
+    if health_reason:
+        health_line += f" ({health_reason})"
 
     return "\n".join([
         "## 오늘 한 일",
-        f"- {parsed.get('today_work', '')}",
+        to_bullets(parsed.get("today_work", [])),
         "",
         "## 수행 목적",
-        f"- {parsed.get('purpose', '')}",
+        to_bullets(parsed.get("purpose", [])),
         "",
         "## 하이라이트",
-        f"- {parsed.get('highlight', '')}",
+        to_bullets(parsed.get("highlight", [])),
         "",
         "## 로우라이트",
-        f"- {parsed.get('lowlight', '')}",
+        to_bullets(parsed.get("lowlight", [])),
         "",
         "## 내일의 우선순위",
-        f"- {parsed.get('tomorrow_priority', '')}",
+        to_bullets(parsed.get("tomorrow_priority", [])),
         "",
         "## 오늘 내가 팀에 기여한 가치",
-        f"- {parsed.get('team_value', '')}",
+        to_bullets(parsed.get("team_value", [])),
         "",
         "## 오늘의 배움 또는 남길 말",
         f"- {parsed.get('learning_or_note', '')}",
         "",
         "## 헬스 체크 (10점)",
-        f"- {health}/10",
+        health_line,
     ])
 
 
