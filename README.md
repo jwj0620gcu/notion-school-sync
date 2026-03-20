@@ -1,4 +1,4 @@
-# 📋 Notion × 1000.school 자동 동기화 + AI 감독 리포트
+# 📋 Notion × 1000.school Daily Snippet 자동 동기화 + AI 감독 리포트
 
 > 노션에 데일리 기록을 작성하면, AI가 다듬어서 자동으로 제출하고 흐름을 분석해줍니다.
 
