@@ -360,10 +360,11 @@ def get_page_last_edited(page_id: str) -> str:
     return resp.get("last_edited_time", "")
 
 
-def run_once(polish: bool = False) -> bool:
+def run_once(polish: bool = False) -> str | None:
     """
-    한 번 실행. 업로드 성공 시 True 반환
-    polish=True 이면 Gemini로 내용을 다듬은 후 업로드
+    한 번 실행. 업로드 성공 시 실제 업로드된 content 반환, 실패 시 None 반환.
+    polish=True 이면 Gemini로 내용을 다듬은 후 업로드.
+    반환값을 해시로 저장해야 역방향 동기화 루프를 막을 수 있음.
     """
     today = effective_date()
     title = today.strftime("%Y-%m-%d")
@@ -371,12 +372,12 @@ def run_once(polish: bool = False) -> bool:
     page_id = find_today_child_page(NOTION_PAGE_ID)
     if not page_id:
         print(f"❌ '{title}' 하위 페이지 없음.", flush=True)
-        return False
+        return None
 
     content = get_notion_content(page_id)
     if not content.strip():
         print("⏳ 페이지 내용이 비어있습니다.", flush=True)
-        return False
+        return None
 
     if polish:
         print(f"[{_now()}] ✨ Gemini 다듬기 시작...", flush=True)
@@ -389,7 +390,7 @@ def run_once(polish: bool = False) -> bool:
     result = save_snippet(content)
     print(f"✅ 업로드 완료! 스니펫 ID: {result['id']} | {result['date']}", flush=True)
     print(f"   내용: {content[:60]}{'...' if len(content) > 60 else ''}", flush=True)
-    return True
+    return content  # 실제 업로드된 내용 반환 (해시 저장용)
 
 
 def _heading_block(level: int, text: str) -> dict:
@@ -511,14 +512,12 @@ def watch(interval: int = 600):
 
                 if edited != last_edited:
                     print(f"[{_now()}] 🔄 변경 감지! Gemini 다듬기 후 업로드 중...", flush=True)
-                    did_upload = run_once(polish=True)
-                    if did_upload:
+                    uploaded_content = run_once(polish=True)
+                    if uploaded_content is not None:
                         last_edited = edited
-                        # 업로드한 내용 해시 저장 → 역방향 동기화 루프 방지
-                        try:
-                            last_reverse_sync_hash = _content_hash(get_notion_content(page_id))
-                        except Exception:
-                            pass
+                        # 실제 업로드된 내용(Gemini 다듬기 결과)으로 해시 저장
+                        # → 역방향 동기화 시 "이미 반영된 내용"으로 인식해 덮어쓰기 방지
+                        last_reverse_sync_hash = _content_hash(uploaded_content)
                 else:
                     print(f"[{_now()}] ✓ 변경 없음", flush=True)
 
@@ -616,4 +615,6 @@ if __name__ == "__main__":
         today = effective_date()
         title = today.strftime("%Y-%m-%d")
         print(f"📅 오늘 날짜 하위 페이지 찾는 중: '{title}' (KST 9시 기준)")
-        run_once()
+        result = run_once()
+        if result is None:
+            print("❌ 업로드 실패 또는 내용 없음")
