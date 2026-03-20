@@ -9,6 +9,7 @@
 """
 
 import os
+import re
 import json
 import requests
 from dotenv import load_dotenv
@@ -105,13 +106,14 @@ def md_to_notion_blocks(text: str) -> list:
             blocks.append({"object": "block", "type": "divider", "divider": {}})
 
         elif line.strip():
-            # 번호 목록 (1. 2. ...)
-            if len(line) > 2 and line[0].isdigit() and line[1] in ".)" and line[2] == " ":
+            # 번호 목록 (1. 2. 10. 등 여러 자리 숫자도 처리)
+            m = re.match(r'^\d+[.)]\s+(.+)', line)
+            if m:
                 blocks.append({
                     "object": "block",
                     "type": "numbered_list_item",
                     "numbered_list_item": {
-                        "rich_text": [{"type": "text", "text": {"content": line[3:]}}]
+                        "rich_text": [{"type": "text", "text": {"content": m.group(1)}}]
                     },
                 })
             else:

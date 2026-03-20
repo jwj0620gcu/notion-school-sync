@@ -12,7 +12,9 @@ AI 감독 리포트 생성기
 """
 
 import os
+import re
 import json
+import time
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -173,15 +175,23 @@ def analyze_with_gemini(prompt: str) -> dict:
             "responseMimeType": "application/json",
         },
     }
-    resp = requests.post(url, json=payload, timeout=60)
-    resp.raise_for_status()
+    # 최대 3번 재시도 (429·500·503 일시 오류 대응)
+    for attempt in range(1, 4):
+        resp = requests.post(url, json=payload, timeout=60)
+        if resp.ok:
+            break
+        if resp.status_code not in (429, 500, 503) or attempt == 3:
+            raise RuntimeError(f"Gemini 요청 실패: {resp.status_code} / {resp.text[:200]}")
+        time.sleep(attempt * 2)
 
     data = resp.json()
     candidates = data.get("candidates", [])
     if not candidates:
         raise ValueError(f"Gemini 응답에 candidates 없음: {data}")
-    raw = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-    raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+    raw = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+    # responseMimeType: application/json 이지만 혹시 ``` 래핑된 경우 제거 (substring 제거)
+    raw = re.sub(r'^```(?:json)?\s*', '', raw)
+    raw = re.sub(r'\s*```$', '', raw).strip()
     if not raw:
         raise ValueError("Gemini 응답 텍스트가 비어있음")
     return json.loads(raw)
@@ -262,6 +272,9 @@ def _bullet(content: str) -> dict:
 
 def build_report_blocks(analysis: dict, snippets: list[dict], priority_rate: float) -> list[dict]:
     """분석 결과 → 노션 블록 리스트"""
+    if not snippets:
+        return [_callout("분석할 스니펫이 없습니다.", "⚠️")]
+
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     blocks = []
 

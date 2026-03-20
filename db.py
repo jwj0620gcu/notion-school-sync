@@ -108,12 +108,23 @@ def extract_health_score(content: str) -> float | None:
 
 
 def extract_section(content: str, section_name: str) -> str:
-    """특정 섹션 텍스트 추출 (예: '하이라이트', '로우라이트')"""
+    """특정 섹션 텍스트 추출 (예: '하이라이트', '로우라이트')
+
+    section_name은 정규식 패턴으로 사용됨.
+    - OR 패턴:   "배움|남길 말"  → (?:배움|남길 말) 으로 감싸서 우선순위 오류 방지
+    - 와일드카드: "팀.*기여"      → 헤딩 줄 어디에나 등장해도 매칭
+    - 일반:      "하이라이트"    → 헤딩 줄에 포함되면 매칭
+
+    헤딩 줄 전체에서 section_name을 탐색하므로
+    "## 오늘의 배움 또는 남길 말" 처럼 앞에 수식어가 붙어도 올바르게 추출.
+    """
     if not content:
         return ""
-    pattern = rf'#+\s*{section_name}[^\n]*\n(.*?)(?=\n#+\s|\Z)'
+    # 헤딩 줄(#+로 시작) 어디서든 section_name 패턴이 나오면 매칭
+    # (?:{section_name}) 으로 감싸서 | 연산자를 section_name 내부로 한정
+    pattern = rf'#+[^\n]*(?:{section_name})[^\n]*\n(.*?)(?=\n#+\s|\Z)'
     m = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
-    if m:
+    if m and m.group(1) is not None:
         return m.group(1).strip()
     return ""
 
