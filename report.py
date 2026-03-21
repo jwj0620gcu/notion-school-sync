@@ -671,8 +671,9 @@ def run_weekly(target_monday: date = None):
         target_monday = today - timedelta(days=today.weekday())  # 이번 주 월요일
 
     week_end = target_monday + timedelta(days=6)
-    if week_end > today:
-        week_end = today  # 아직 끝나지 않은 주는 오늘까지만
+    yesterday = today - timedelta(days=1)
+    if week_end >= today:
+        week_end = yesterday  # 오늘은 아직 작성 중이므로 제외
 
     week_num  = target_monday.isocalendar()[1]
     year      = target_monday.year
@@ -732,8 +733,9 @@ def run_monthly(year: int = None, month: int = None):
         end = date(year + 1, 1, 1) - timedelta(days=1)
     else:
         end = date(year, month + 1, 1) - timedelta(days=1)
-    if end > today:
-        end = today
+    yesterday = today - timedelta(days=1)
+    if end >= today:
+        end = yesterday  # 오늘은 아직 작성 중이므로 제외
 
     page_title   = f"{year}-{month:02d} ({month}월)"
     period_label = f"{year}년 {month}월 ({start.strftime('%m/%d')}~{end.strftime('%m/%d')})"
