@@ -165,7 +165,7 @@ def upsert_snippet(snippet: dict):
         snippet.get("id"),
         snippet.get("date"),
         content,
-        feedback_raw if isinstance(feedback_raw, str) else json.dumps(feedback_raw, ensure_ascii=False),
+        feedback_raw if isinstance(feedback_raw, str) else (json.dumps(feedback_raw, ensure_ascii=False) if feedback_raw is not None else None),
         extract_health_score(content),
         feedback_score,
         extract_section(content, "하이라이트"),
@@ -184,6 +184,17 @@ def get_all_snippets() -> list[dict]:
     """전체 스니펫 날짜순 반환"""
     conn = get_conn()
     rows = conn.execute("SELECT * FROM snippets ORDER BY date ASC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_snippets_by_date_range(start_date: str, end_date: str) -> list[dict]:
+    """start_date ~ end_date (포함) 범위의 스니펫 날짜순 반환"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM snippets WHERE date >= ? AND date <= ? ORDER BY date ASC",
+        (start_date, end_date)
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

@@ -16,7 +16,7 @@ import re
 import json
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from notion_client import Client
@@ -34,8 +34,9 @@ NOTION_TOKEN    = os.getenv("NOTION_TOKEN")
 NOTION_PAGE_ID  = os.getenv("NOTION_PAGE_ID")   # 리포트 페이지가 들어갈 부모 페이지
 GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY")    # 나중에 추가
 
-API_BASE        = "https://api.1000.school"
-REPORT_TITLE    = "📊 AI 감독 리포트"
+API_BASE               = "https://api.1000.school"
+WEEKLY_CONTAINER_TITLE = "📅 주간 리포트"
+MONTHLY_CONTAINER_TITLE= "📆 월간 리포트"
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -53,7 +54,7 @@ def sync_snippets():
         db.upsert_snippet(item)
 
     if items:
-        dates = [item["date"] for item in items]
+        dates = [item.get("date", "unknown") for item in items]
         print(f"   ✅ {len(items)}개 스니펫 최신화 완료")
         print(f"   📅 동기화된 날짜: {', '.join(sorted(dates))}")
     return items
@@ -68,7 +69,7 @@ def build_gemini_summary(snippets: list[dict]) -> str:
     """
     lines = []
     for s in snippets:
-        date          = s.get("date", "")
+        snippet_date  = s.get("date", "")
         health        = s.get("health_score")
         fb_score      = s.get("feedback_score")
         highlights    = (s.get("highlights") or "").strip()[:120]
@@ -77,7 +78,7 @@ def build_gemini_summary(snippets: list[dict]) -> str:
         team          = (s.get("team_mentions") or "").strip()[:100]
         learnings     = (s.get("learnings") or "").strip()[:100]
 
-        block = f"""[{date}]
+        block = f"""[{snippet_date}]
 헬스:{health}/10 | 피드백:{fb_score}점
 하이라이트: {highlights}
 로우라이트: {lowlights}
@@ -270,7 +271,7 @@ def _bullet(content: str) -> dict:
             "bulleted_list_item": {"rich_text": [_text(content)]}}
 
 
-def build_report_blocks(analysis: dict, snippets: list[dict], priority_rate: float) -> list[dict]:
+def build_report_blocks(analysis: dict, snippets: list[dict], priority_rate: float, period_label: str = "") -> list[dict]:
     """분석 결과 → 노션 블록 리스트"""
     if not snippets:
         return [_callout("분석할 스니펫이 없습니다.", "⚠️")]
@@ -279,8 +280,9 @@ def build_report_blocks(analysis: dict, snippets: list[dict], priority_rate: flo
     blocks = []
 
     # ── 헤더
+    period_str = period_label or f"{snippets[0]['date']} ~ {snippets[-1]['date']}"
     blocks.append(_callout(
-        f"마지막 업데이트: {now}  |  분석 스니펫: {len(snippets)}개  |  기간: {snippets[0]['date']} ~ {snippets[-1]['date']}",
+        f"마지막 업데이트: {now}  |  분석 스니펫: {len(snippets)}개  |  기간: {period_str}",
         "📊"
     ))
     blocks.append(_divider())
@@ -351,25 +353,24 @@ def build_report_blocks(analysis: dict, snippets: list[dict], priority_rate: flo
     return blocks
 
 
-def find_or_create_report_page() -> str:
-    """리포트 페이지가 있으면 ID 반환, 없으면 새로 생성"""
+def find_or_create_child_page(parent_id: str, title: str) -> str:
+    """부모 페이지 아래에서 title 하위 페이지를 찾거나 새로 생성 후 ID 반환"""
     cursor = None
     while True:
         resp = notion.blocks.children.list(
-            block_id=NOTION_PAGE_ID, start_cursor=cursor, page_size=100
+            block_id=parent_id, start_cursor=cursor, page_size=100
         )
         for block in resp["results"]:
             if block.get("type") == "child_page":
-                if block["child_page"]["title"] == REPORT_TITLE:
+                if block["child_page"]["title"] == title:
                     return block["id"]
         if not resp.get("has_more"):
             break
         cursor = resp["next_cursor"]
 
-    # 없으면 생성
     page = notion.pages.create(
-        parent={"page_id": NOTION_PAGE_ID},
-        properties={"title": {"title": [{"type": "text", "text": {"content": REPORT_TITLE}}]}},
+        parent={"page_id": parent_id},
+        properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
     )
     return page["id"]
 
@@ -400,62 +401,388 @@ def write_report_to_notion(page_id: str, blocks: list[dict]):
         )
 
 
+# ─── 공통 리포트 생성 헬퍼 ────────────────────────────────────────────────────
+
+def _run_analysis(snippets: list[dict]) -> tuple[dict, float]:
+    """
+    스니펫 목록 → Gemini 7지표 분석 수행
+    반환: (analysis dict, priority_rate float)
+    """
+    priority_rate = db.calc_priority_achievement(snippets)
+    summary       = build_gemini_summary(snippets)
+    prompt        = build_gemini_prompt(summary)
+    analysis      = analyze_with_gemini(prompt)
+    return analysis, priority_rate
+
+
+def _generate_report(snippets: list[dict], page_id: str, period_label: str,
+                     analysis: dict = None, priority_rate: float = None):
+    """
+    스니펫 리스트 → 노션 페이지 업데이트
+    analysis가 주어지면 Gemini 재호출 없이 재사용 (run_weekly에서 분석 공유 시)
+    """
+    if not snippets:
+        print(f"   ℹ️  [{period_label}] 스니펫 없음 → 스킵")
+        return
+
+    if analysis is None:
+        analysis, priority_rate = _run_analysis(snippets)
+    elif priority_rate is None:
+        priority_rate = db.calc_priority_achievement(snippets)
+
+    analysis_for_db = {
+        "snippet_count":    len(snippets),
+        "burnout_risk":     analysis.get("burnout_risk", {}).get("score"),
+        "team_health":      analysis.get("team_health", {}).get("score"),
+        "diligence":        analysis.get("diligence", {}).get("score"),
+        "recurrence":       analysis.get("recurrence", {}).get("score"),
+        "growth":           analysis.get("growth", {}).get("score"),
+        "execution":        analysis.get("execution", {}).get("score"),
+        "emotional_energy": analysis.get("emotional_energy", {}).get("score"),
+        "details":          {k: analysis[k] for k in ["burnout_risk","team_health","diligence","recurrence","growth","execution","emotional_energy"] if k in analysis},
+        "alert_days":       analysis.get("alert_days", []),
+        "improvement_areas":analysis.get("improvement_areas", []),
+        "positive_trends":  analysis.get("positive_trends", []),
+        "overall_summary":  analysis.get("overall_summary", ""),
+    }
+    row_id = db.save_analysis(analysis_for_db)
+
+    clear_page_blocks(page_id)
+    blocks = build_report_blocks(analysis, snippets, priority_rate, period_label=period_label)
+    write_report_to_notion(page_id, blocks)
+    db.update_analysis_notion_id(row_id, page_id)
+    print(f"   ✅ [{period_label}] 리포트 완료 → https://notion.so/{page_id.replace('-', '')}")
+
+
+# ─── 1000.school 주간 스니펫 ──────────────────────────────────────────────────
+
+def _get_weekly_snippet_from_school(headers: dict, week_monday: str) -> dict | None:
+    """해당 주(월요일 날짜)의 기존 주간 스니펫 조회"""
+    resp = requests.get(f"{API_BASE}/weekly-snippets", headers=headers)
+    resp.raise_for_status()
+    for item in resp.json().get("items", []):
+        if item.get("week") == week_monday:
+            return item
+    return None
+
+
+def save_weekly_snippet_to_school(content: str, week_monday: str) -> dict:
+    """주간 스니펫 저장 (없으면 POST, 있으면 PUT)"""
+    headers = {
+        "Authorization": f"Bearer {SCHOOL_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    existing = _get_weekly_snippet_from_school(headers, week_monday)
+
+    if existing:
+        snippet_id = existing["id"]
+        print(f"   📝 기존 주간 스니펫(id={snippet_id}) 수정 중...")
+        resp = requests.put(
+            f"{API_BASE}/weekly-snippets/{snippet_id}",
+            json={"content": content},
+            headers=headers,
+        )
+    else:
+        print("   ✏️  새 주간 스니펫 작성 중...")
+        resp = requests.post(
+            f"{API_BASE}/weekly-snippets",
+            json={"content": content},
+            headers=headers,
+        )
+
+    resp.raise_for_status()
+    return resp.json()
+
+
+def gemini_weekly_snippet(snippets: list[dict], week_monday: date,
+                          analysis: dict = None) -> str:
+    """
+    일간 스니펫 + AI 감독 분석 → 1000.school용 주간 스니펫 콘텐츠 생성 (Gemini)
+    analysis가 주어지면 7지표 점수·요약·개선영역도 프롬프트에 포함해 더 풍부한 내용 생성
+    """
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY 없음")
+
+    week_end = week_monday + timedelta(days=6)
+    period   = f"{week_monday.strftime('%m/%d')}~{week_end.strftime('%m/%d')}"
+
+    # ── 일간 스니펫 요약 블록
+    daily_summaries = []
+    for s in snippets:
+        highlights = (s.get("highlights") or "").strip()[:120]
+        lowlights  = (s.get("lowlights") or "").strip()[:120]
+        goals      = (s.get("tomorrow_goals") or "").strip()[:100]
+        health     = s.get("health_score")
+        daily_summaries.append(
+            f"[{s['date']}]\n하이라이트: {highlights}\n로우라이트: {lowlights}\n"
+            f"내일목표: {goals}\n헬스: {health}/10"
+        )
+
+    # ── AI 감독 분석 블록 (있을 때만 추가)
+    analysis_block_lines = []
+    if analysis:
+        scores = {
+            "번아웃 위험도":  analysis.get("burnout_risk",     {}).get("score"),
+            "팀 건강도":      analysis.get("team_health",      {}).get("score"),
+            "성실도":         analysis.get("diligence",        {}).get("score"),
+            "문제 재발성":    analysis.get("recurrence",       {}).get("score"),
+            "성장 지수":      analysis.get("growth",           {}).get("score"),
+            "실행 집중도":    analysis.get("execution",        {}).get("score"),
+            "감정 에너지":    analysis.get("emotional_energy", {}).get("score"),
+        }
+        score_lines = [f"  {label}: {score}/100" for label, score in scores.items() if score is not None]
+        analysis_block_lines = [
+            "=== AI 감독 분석 결과 ===",
+            "[ 7대 지표 점수 ]",
+            *score_lines,
+            "",
+            "[ 전체 흐름 요약 ]",
+            analysis.get("overall_summary", ""),
+        ]
+        improve = analysis.get("improvement_areas", [])
+        if improve:
+            analysis_block_lines += ["", "[ 지속 개선 필요 영역 ]", *[f"  - {i}" for i in improve]]
+        positive = analysis.get("positive_trends", [])
+        if positive:
+            analysis_block_lines += ["", "[ 긍정적 변화 ]", *[f"  - {p}" for p in positive]]
+        alert_days = analysis.get("alert_days", [])
+        if alert_days:
+            analysis_block_lines += ["", "[ 주의 날짜 ]",
+                *[f"  - {a.get('date')}: {a.get('reason')}" for a in alert_days]]
+
+    prompt_parts = [
+        f"아래 일간 스니펫과 AI 감독 분석을 종합해서 {period} 주간 회고를 작성해라.",
+        "출력은 반드시 JSON 객체 하나만 반환해라. 입력에 없는 사실은 절대 지어내지 마라.",
+        "",
+        "=== 일간 스니펫 ===",
+        "\n\n".join(daily_summaries),
+    ]
+    if analysis_block_lines:
+        prompt_parts += ["", *analysis_block_lines]
+
+    prompt_parts += [
+        "",
+        "=== 필드별 작성 기준 ===",
+        "",
+        "weekly_highlight (배열, 3~5개):",
+        "  - 이번 주 가장 의미 있는 성과나 긍정적 순간.",
+        "  - AI 감독의 긍정적 변화·성장 지수도 반영해 구체적으로 작성.",
+        "",
+        "weekly_lowlight (배열, 1~3개):",
+        "  - 이번 주 아쉬웠거나 반복된 문제.",
+        "  - AI 감독의 지속 개선 필요 영역·주의 날짜도 반영해 작성.",
+        "  - 문제가 없으면 ['특별한 로우라이트 없음'].",
+        "",
+        "next_week_priority (배열, 3~5개):",
+        "  - 다음 주 집중할 우선순위. '영역: 행동 (목표량)' 형식 권장.",
+        "  - AI 감독의 개선 필요 영역을 우선순위에 반드시 반영해라.",
+        "",
+        "growth_summary (문자열):",
+        "  - 이번 주 전반적인 성장 또는 배움을 2~3문장으로.",
+        "  - AI 감독의 전체 흐름 요약·성장 지수를 근거로 작성.",
+        "",
+        "team_contribution (배열, 1~3개):",
+        "  - 이번 주 팀에 기여한 내용. AI 감독 팀 건강도도 참고.",
+        "",
+        "avg_health_score (정수, 1~10):",
+        "  - 이번 주 평균 헬스 점수 (일간 스니펫 헬스 평균 기준).",
+        "",
+        "supervisor_comment (문자열):",
+        "  - AI 감독 관점에서 이번 주 핵심 피드백 1~2문장.",
+        "  - 번아웃 위험·팀 건강·감정 에너지 등 지표를 토대로 작성.",
+        "  - AI 감독 분석이 없으면 빈 문자열 반환.",
+        "",
+        "JSON 키: weekly_highlight, weekly_lowlight, next_week_priority, "
+        "growth_summary, team_contribution, avg_health_score, supervisor_comment",
+    ]
+
+    prompt = "\n".join(prompt_parts)
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.4, "responseMimeType": "application/json"},
+    }
+
+    for attempt in range(1, 4):
+        resp = requests.post(url, json=payload, timeout=60)
+        if resp.ok:
+            break
+        if resp.status_code not in (429, 500, 503) or attempt == 3:
+            raise RuntimeError(f"Gemini 주간 스니펫 요청 실패: {resp.status_code} / {resp.text[:200]}")
+        time.sleep(attempt * 2)
+
+    raw = resp.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+    raw = re.sub(r'^```(?:json)?\s*', '', raw)
+    raw = re.sub(r'\s*```$', '', raw).strip()
+    if not raw:
+        raise ValueError("Gemini 주간 스니펫 응답 텍스트가 비어있음")
+    parsed = json.loads(raw)
+
+    def to_bullets(val) -> str:
+        if isinstance(val, list):
+            return "\n".join(f"- {item}" for item in val if item)
+        return f"- {val}" if val else ""
+
+    try:
+        health = max(1, min(10, int(parsed.get("avg_health_score") or 5)))
+    except (TypeError, ValueError):
+        health = 5
+
+    lines = [
+        f"## 이번 주 하이라이트 ({period})",
+        to_bullets(parsed.get("weekly_highlight", [])),
+        "",
+        "## 로우라이트",
+        to_bullets(parsed.get("weekly_lowlight", [])),
+        "",
+        "## 다음 주 우선순위",
+        to_bullets(parsed.get("next_week_priority", [])),
+        "",
+        "## 팀 기여",
+        to_bullets(parsed.get("team_contribution", [])),
+        "",
+        "## 성장 요약",
+        f"- {parsed.get('growth_summary', '')}",
+        "",
+        "## 헬스 체크 (10점)",
+        f"- {health}/10 (주간 평균)",
+    ]
+
+    supervisor = parsed.get("supervisor_comment", "").strip()
+    if supervisor:
+        lines += ["", "## AI 감독 코멘트", f"- {supervisor}"]
+
+    return "\n".join(lines)
+
+
+# ─── 주간 리포트 ───────────────────────────────────────────────────────────────
+
+def run_weekly(target_monday: date = None):
+    """
+    target_monday가 포함된 주(월~일)의 주간 리포트 생성/갱신
+    target_monday=None → 이번 주 월요일 기준 (현재 진행 중인 주)
+    """
+    today = datetime.now(KST).date()
+    if target_monday is None:
+        target_monday = today - timedelta(days=today.weekday())  # 이번 주 월요일
+
+    week_end = target_monday + timedelta(days=6)
+    if week_end > today:
+        week_end = today  # 아직 끝나지 않은 주는 오늘까지만
+
+    week_num  = target_monday.isocalendar()[1]
+    year      = target_monday.year
+    page_title = f"W{week_num:02d} ({target_monday.strftime('%m/%d')}~{week_end.strftime('%m/%d')})"
+    period_label = f"{year}-W{week_num:02d} ({target_monday.strftime('%m/%d')}~{week_end.strftime('%m/%d')})"
+
+    print(f"\n📅 주간 리포트 생성 중: {period_label}")
+    snippets = db.get_snippets_by_date_range(
+        target_monday.strftime("%Y-%m-%d"),
+        week_end.strftime("%Y-%m-%d"),
+    )
+
+    if not snippets:
+        print(f"   ℹ️  [{period_label}] 스니펫 없음 → 스킵")
+        return
+
+    # ── Gemini 7지표 분석 (1번만 호출 → 주간 스니펫·노션 리포트 공유)
+    print(f"   🤖 AI 감독 분석 중...")
+    try:
+        analysis, priority_rate = _run_analysis(snippets)
+        print(f"   ✅ 분석 완료")
+    except Exception as e:
+        print(f"   ⚠️  AI 분석 실패: {e} → 분석 없이 진행")
+        analysis, priority_rate = None, db.calc_priority_achievement(snippets)
+
+    # ── 1000.school 주간 스니펫 업로드 (일간 스니펫 + AI 분석 종합)
+    print(f"   📤 1000.school 주간 스니펫 업로드 중...")
+    try:
+        weekly_content = gemini_weekly_snippet(snippets, target_monday, analysis=analysis)
+        result = save_weekly_snippet_to_school(weekly_content, target_monday.strftime("%Y-%m-%d"))
+        print(f"   ✅ 주간 스니펫 업로드 완료 (id={result.get('id')})")
+    except Exception as e:
+        print(f"   ⚠️  주간 스니펫 업로드 실패: {e}")
+
+    # ── 노션 주간 리포트 (분석 결과 재사용)
+    container_id = find_or_create_child_page(NOTION_PAGE_ID, WEEKLY_CONTAINER_TITLE)
+    page_id      = find_or_create_child_page(container_id, page_title)
+    _generate_report(snippets, page_id, period_label, analysis=analysis, priority_rate=priority_rate)
+
+
+# ─── 월간 리포트 ───────────────────────────────────────────────────────────────
+
+def run_monthly(year: int = None, month: int = None):
+    """
+    year/month 월의 월간 리포트 생성/갱신
+    None → 이번 달 기준
+    """
+    today = datetime.now(KST).date()
+    if year is None:
+        year = today.year
+    if month is None:
+        month = today.month
+
+    start = date(year, month, 1)
+    # 해당 월의 마지막 날
+    if month == 12:
+        end = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end = date(year, month + 1, 1) - timedelta(days=1)
+    if end > today:
+        end = today
+
+    page_title   = f"{year}-{month:02d} ({month}월)"
+    period_label = f"{year}년 {month}월 ({start.strftime('%m/%d')}~{end.strftime('%m/%d')})"
+
+    print(f"\n📆 월간 리포트 생성 중: {period_label}")
+    snippets = db.get_snippets_by_date_range(
+        start.strftime("%Y-%m-%d"),
+        end.strftime("%Y-%m-%d"),
+    )
+
+    if not snippets:
+        print(f"   ℹ️  [{period_label}] 스니펫 없음 → 스킵")
+        return
+
+    # ── Gemini 7지표 분석 (1번만 호출 → 노션 리포트에 사용)
+    print(f"   🤖 AI 감독 분석 중...")
+    try:
+        analysis, priority_rate = _run_analysis(snippets)
+        print(f"   ✅ 분석 완료")
+    except Exception as e:
+        print(f"   ⚠️  AI 분석 실패: {e} → 분석 없이 진행")
+        analysis, priority_rate = None, db.calc_priority_achievement(snippets)
+
+    container_id = find_or_create_child_page(NOTION_PAGE_ID, MONTHLY_CONTAINER_TITLE)
+    page_id      = find_or_create_child_page(container_id, page_title)
+    _generate_report(snippets, page_id, period_label, analysis=analysis, priority_rate=priority_rate)
+
+
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 
 def run():
+    """이번 주 + 이번 달 리포트 생성/갱신 (수동 실행 또는 9시 자동 실행)"""
     print("=" * 50)
     print("📊 AI 감독 리포트 생성 시작")
     print("=" * 50)
 
-    # 1. DB 초기화
     db.init_db()
 
-    # 2. 스니펫 동기화
-    print("\n[1/4] 스니펫 동기화 중...")
+    print("\n[1/3] 스니펫 동기화 중...")
     sync_snippets()
 
-    # 3. Gemini 분석
-    print("\n[2/4] Gemini 분석 중...")
-    snippets = db.get_all_snippets()
-    if not snippets:
-        print("   ⚠️  분석할 스니펫 없음 → 종료")
-        return
-    priority_rate  = db.calc_priority_achievement(snippets)
-    summary        = build_gemini_summary(snippets)
-    prompt         = build_gemini_prompt(summary)
-    analysis       = analyze_with_gemini(prompt)
-    print("   ✅ 분석 완료")
+    print("\n[2/3] 주간 리포트...")
+    run_weekly()
 
-    # 4. DB에 결과 저장 (각 지표에서 score만 추출)
-    analysis["snippet_count"] = len(snippets)
-    analysis_for_db = {
-        "snippet_count":   len(snippets),
-        "burnout_risk":    analysis.get("burnout_risk", {}).get("score"),
-        "team_health":     analysis.get("team_health", {}).get("score"),
-        "diligence":       analysis.get("diligence", {}).get("score"),
-        "recurrence":      analysis.get("recurrence", {}).get("score"),
-        "growth":          analysis.get("growth", {}).get("score"),
-        "execution":       analysis.get("execution", {}).get("score"),
-        "emotional_energy":analysis.get("emotional_energy", {}).get("score"),
-        "details":         {k: analysis[k] for k in ["burnout_risk","team_health","diligence","recurrence","growth","execution","emotional_energy"] if k in analysis},
-        "alert_days":      analysis.get("alert_days", []),
-        "improvement_areas": analysis.get("improvement_areas", []),
-        "positive_trends": analysis.get("positive_trends", []),
-        "overall_summary": analysis.get("overall_summary", ""),
-    }
-    row_id = db.save_analysis(analysis_for_db)
+    print("\n[3/3] 월간 리포트...")
+    run_monthly()
 
-    # 5. 노션 리포트 페이지 업데이트
-    print("\n[3/4] 노션 리포트 페이지 업데이트 중...")
-    page_id = find_or_create_report_page()
-    clear_page_blocks(page_id)
-    blocks = build_report_blocks(analysis, snippets, priority_rate)
-    write_report_to_notion(page_id, blocks)
-    db.update_analysis_notion_id(row_id, page_id)
-    print(f"   ✅ 노션 페이지 업데이트 완료 (id: {page_id})")
-
-    print("\n[4/4] 완료!")
-    print(f"   📄 리포트 페이지: https://notion.so/{page_id.replace('-', '')}")
+    print("\n" + "=" * 50)
+    print("✅ 모든 리포트 생성 완료")
     print("=" * 50)
 
 

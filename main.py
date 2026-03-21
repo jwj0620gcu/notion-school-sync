@@ -15,14 +15,12 @@ import re
 import sys
 import time
 import json
-import hashlib
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 from notion_client import Client
 import report as report_module
-import sync_to_notion as sync_module
 
 KST = ZoneInfo("Asia/Seoul")
 DAY_START_HOUR = 9  # 오전 9시 기준으로 날짜 전환
@@ -267,14 +265,15 @@ def gemini_polish_content(raw_content: str, snippet_date: str) -> str:
     if raw_text.startswith("{"):
         parsed = json.loads(raw_text)
     else:
-        import re
         m = re.search(r'\{[\s\S]*\}', raw_text)
         if not m:
             raise ValueError("Gemini 응답에서 JSON을 찾지 못했습니다.")
         parsed = json.loads(m.group(0))
 
-    health = int(parsed.get("health_score", 5))
-    health = max(1, min(10, health))
+    try:
+        health = max(1, min(10, int(parsed.get("health_score") or 5)))
+    except (TypeError, ValueError):
+        health = 5
     health_reason = parsed.get("health_reason", "")
 
     def to_bullets(val) -> str:
@@ -367,6 +366,10 @@ def run_once(polish: bool = False) -> str | None:
     polish=True 이면 Gemini로 내용을 다듬은 후 업로드.
     반환값을 해시로 저장해야 역방향 동기화 루프를 막을 수 있음.
     """
+    if not NOTION_PAGE_ID:
+        print("❌ NOTION_PAGE_ID 환경변수가 설정되지 않았습니다.", flush=True)
+        return None
+
     today = effective_date()
     title = today.strftime("%Y-%m-%d")
 
@@ -380,6 +383,12 @@ def run_once(polish: bool = False) -> str | None:
         print("⏳ 페이지 내용이 비어있습니다.", flush=True)
         return None
 
+    # 헤더만 있고 실제 내용이 없는 빈 템플릿이면 업로드 스킵
+    actual_lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
+    if not actual_lines:
+        print("⏳ 템플릿만 있고 내용이 없습니다. 작성 후 다시 시도하세요.", flush=True)
+        return None
+
     if polish:
         print(f"[{_now()}] ✨ Gemini 다듬기 시작...", flush=True)
         try:
@@ -389,7 +398,8 @@ def run_once(polish: bool = False) -> str | None:
             print(f"[{_now()}] ⚠️  Gemini 다듬기 실패 → 원문 그대로 업로드: {e}", flush=True)
 
     result = save_snippet(content)
-    print(f"✅ 업로드 완료! 스니펫 ID: {result['id']} | {result['date']}", flush=True)
+    snippet = result.get("snippet") or result
+    print(f"✅ 업로드 완료! 스니펫 ID: {snippet.get('id')} | {snippet.get('date')}", flush=True)
     print(f"   내용: {content[:60]}{'...' if len(content) > 60 else ''}", flush=True)
     return content  # 실제 업로드된 내용 반환 (해시 저장용)
 
@@ -441,21 +451,18 @@ def create_today_notion_page(title: str) -> str | None:
 
 def watch(interval: int = 600):
     """interval초마다 노션 변경 감지 후 자동 업로드 + 리포트 갱신"""
+    if not NOTION_PAGE_ID:
+        print("❌ NOTION_PAGE_ID 환경변수가 설정되지 않았습니다. Watch 모드를 시작할 수 없습니다.", flush=True)
+        return
+
     print(f"👀 Watch 모드 시작 (매 {interval//60}분마다 체크, Ctrl+C로 종료)", flush=True)
     print(f"   📅 날짜 기준: KST 오전 {DAY_START_HOUR}시\n", flush=True)
 
-    last_edited             = None
-    last_report_date        = None
-    last_page_created       = None
-    last_sync_date          = None
-    last_reverse_sync_at    = None
-    last_reverse_sync_hash  = None   # 마지막으로 역방향 동기화된 1000.school 내용 해시
-    last_tracked_date       = None   # 날짜 변경 감지용
-    last_change_detected_at = None   # 마지막 노션 변경 감지 시각 (polish 타이밍 계산용)
-    polish_done_date        = None   # 해당 날짜 polish 완료 여부 (중복 방지)
-
-    REVERSE_SYNC_INTERVAL = 600  # 10분 (초)
-    POLISH_WAIT_MIN       = 30   # Tomorrow 섹션 감지 후 polish까지 대기 분
+    last_edited          = None
+    last_page_created    = None
+    last_tracked_date    = None
+    last_weekly_monday   = None   # 마지막으로 주간 리포트 생성한 월요일
+    last_monthly_ym      = None   # 마지막으로 월간 리포트 생성한 (year, month)
 
     while True:
         try:
@@ -465,11 +472,8 @@ def watch(interval: int = 600):
 
             # ── 날짜가 바뀌면 상태 리셋 ──────────────────────────────────────
             if today != last_tracked_date:
-                last_edited             = None
-                last_reverse_sync_hash  = None
-                last_change_detected_at = None  # 새 날 변경 감지 초기화
-                polish_done_date        = None  # 새 날 polish 가능하도록
-                last_tracked_date       = today
+                last_edited       = None
+                last_tracked_date = today
 
             # ── 오늘 페이지 한 번만 조회 (루프당 API 1번으로 절약) ───────────
             page_id = find_today_child_page(NOTION_PAGE_ID)
@@ -487,26 +491,32 @@ def watch(interval: int = 600):
                 else:
                     last_page_created = today  # 페이지가 이미 존재하면 생성 불필요
 
-            # ── 오전 9시 이후 하루 1번: 전날 스니펫 최종본 → 노션 반영 ────────
-            if now.hour >= DAY_START_HOUR and last_sync_date != today:
-                yesterday = (now - timedelta(days=1)).date().strftime("%Y-%m-%d")
-                print(f"[{_now()}] 🔄 전날({yesterday}) 스니펫 최종본 → 노션 반영 중...", flush=True)
-                try:
-                    sync_module.main(update_existing=True, only_date=yesterday)
-                    last_sync_date = today
-                    print(f"[{_now()}] ✅ '{yesterday}' 노션 반영 완료", flush=True)
-                except Exception as se:
-                    print(f"[{_now()}] ⚠️  동기화 실패: {se}", flush=True)
+            # ── 월요일 오전 9시: 지난주 주간 리포트 ──────────────────────────
+            if now.hour >= DAY_START_HOUR and today.weekday() == 0:
+                last_monday = today - timedelta(days=7)   # 지난주 월요일
+                if last_weekly_monday != last_monday:
+                    print(f"[{_now()}] 📅 월요일 → 지난주 주간 리포트 생성 중...", flush=True)
+                    try:
+                        report_module.sync_snippets()
+                        report_module.run_weekly(last_monday)
+                        last_weekly_monday = last_monday
+                        print(f"[{_now()}] ✅ 주간 리포트 완료", flush=True)
+                    except Exception as e:
+                        print(f"[{_now()}] ⚠️  주간 리포트 실패: {e}", flush=True)
 
-            # ── 오전 9시 이후 하루 1번: AI 감독 리포트 자동 갱신 ────────────
-            if now.hour >= DAY_START_HOUR and last_report_date != today:
-                print(f"[{_now()}] 📊 오전 9시 지남 → AI 감독 리포트 자동 갱신 중...", flush=True)
-                try:
-                    report_module.run()
-                    last_report_date = today
-                    print(f"[{_now()}] ✅ 리포트 갱신 완료", flush=True)
-                except Exception as re_err:
-                    print(f"[{_now()}] ⚠️  리포트 갱신 실패: {re_err}", flush=True)
+            # ── 매달 1일 오전 9시: 지난달 월간 리포트 ───────────────────────
+            if now.hour >= DAY_START_HOUR and today.day == 1:
+                prev = today - timedelta(days=1)   # 전달 말일
+                ym = (prev.year, prev.month)
+                if last_monthly_ym != ym:
+                    print(f"[{_now()}] 📆 1일 → 지난달 월간 리포트 생성 중...", flush=True)
+                    try:
+                        report_module.sync_snippets()
+                        report_module.run_monthly(ym[0], ym[1])
+                        last_monthly_ym = ym
+                        print(f"[{_now()}] ✅ 월간 리포트 완료", flush=True)
+                    except Exception as e:
+                        print(f"[{_now()}] ⚠️  월간 리포트 실패: {e}", flush=True)
 
             # ── 노션 변경 감지 → 원문 즉시 업로드 ───────────────────────────
             if not page_id:
@@ -515,79 +525,12 @@ def watch(interval: int = 600):
                 edited = get_page_last_edited(page_id)
 
                 if edited != last_edited:
-                    print(f"[{_now()}] 🔄 변경 감지! 원문 업로드 중...", flush=True)
-                    uploaded_content = run_once(polish=False)
-                    if uploaded_content is not None:
-                        last_edited             = edited
-                        last_change_detected_at = now   # 변경 시각 기록
-                        last_reverse_sync_hash  = _content_hash(uploaded_content)
+                    print(f"[{_now()}] 🔄 변경 감지! Gemini 다듬기 후 업로드 중...", flush=True)
+                    uploaded = run_once(polish=True)
+                    if uploaded is not None:
+                        last_edited = edited
                 else:
                     print(f"[{_now()}] ✓ 변경 없음", flush=True)
-
-            # ── Gemini Polish 조건 체크 ──────────────────────────────────
-            # 조건 1: Tomorrow 섹션 있음 + 30분 무변경 → polish (작성 완료 판단)
-            # 조건 2: 8:50~8:59 폴백 → Tomorrow 못 적어도 9시 전에 강제 polish
-            if page_id and polish_done_date != today and last_change_detected_at:
-                minutes_since = (now - last_change_detected_at).total_seconds() / 60
-                should_polish = False
-                polish_reason = ""
-
-                if minutes_since >= POLISH_WAIT_MIN:
-                    has_tmr, _ = _has_tomorrow_content(page_id)
-                    if has_tmr:
-                        should_polish = True
-                        polish_reason = f"Tomorrow 섹션 확인 + {POLISH_WAIT_MIN}분 경과"
-
-                if not should_polish and now.hour == 8 and now.minute >= 50:
-                    should_polish = True
-                    polish_reason = "8:50 폴백 (Tomorrow 미입력 대비 강제 polish)"
-
-                if should_polish:
-                    print(f"[{_now()}] ✨ Gemini Polish 시작 ({polish_reason})", flush=True)
-                    polished = run_once(polish=True)
-                    if polished is not None:
-                        polish_done_date       = today
-                        last_reverse_sync_hash = _content_hash(polished)
-                        try:
-                            last_edited = get_page_last_edited(page_id)  # 루프 방지
-                        except Exception:
-                            pass
-                        print(f"[{_now()}] ✅ Polish 완료 — 오늘 추가 polish 없음", flush=True)
-
-            # ── 10분마다: 1000.school → 노션 역방향 동기화 ─────────────────
-            # 해시 비교로 실제 변경된 경우만 덮어씀 (깜빡임 방지)
-            now_ts = now  # kst_now() 결과 재사용 (datetime.now() 혼용 방지)
-            if last_reverse_sync_at is None or \
-               (now_ts - last_reverse_sync_at).total_seconds() >= REVERSE_SYNC_INTERVAL:
-
-                last_reverse_sync_at = now_ts  # 타이머 항상 리셋
-
-                try:
-                    school_headers = {"Authorization": f"Bearer {SCHOOL_API_KEY}"}
-                    school_snippet = get_today_snippet(school_headers)
-
-                    if school_snippet:
-                        school_content  = school_snippet.get("content", "") or ""
-                        school_feedback = school_snippet.get("feedback") or ""
-                        if isinstance(school_feedback, dict):
-                            school_feedback = json.dumps(school_feedback, ensure_ascii=False)
-                        school_hash = _content_hash(school_content + school_feedback)
-
-                        if school_hash != last_reverse_sync_hash:
-                            print(f"[{_now()}] 🔁 1000.school 변경 감지 → 노션 업데이트 중... ({title})", flush=True)
-                            sync_module.main(update_existing=True, only_date=title)
-                            last_reverse_sync_hash = school_hash
-                            print(f"[{_now()}] ✅ 역방향 동기화 완료 ({title})", flush=True)
-                            # 역방향 동기화 후 last_edited 갱신 → 순방향 업로드 루프 방지
-                            if page_id:
-                                last_edited = get_page_last_edited(page_id)
-                        else:
-                            print(f"[{_now()}] ✓ 1000.school 내용 동일 → 역방향 동기화 스킵", flush=True)
-                    else:
-                        print(f"[{_now()}] ℹ️  오늘 스니펫 없음 → 역방향 동기화 스킵", flush=True)
-
-                except Exception as se:
-                    print(f"[{_now()}] ⚠️  역방향 동기화 실패: {se}", flush=True)
 
         except Exception as e:
             print(f"[{_now()}] ⚠️  오류: {e}", flush=True)
@@ -598,25 +541,6 @@ def watch(interval: int = 600):
 def _now() -> str:
     return kst_now().strftime("%H:%M:%S")
 
-
-def _content_hash(text: str) -> str:
-    """텍스트 내용의 해시 반환 (공백 정규화 후 비교용)"""
-    normalized = " ".join(text.split())
-    return hashlib.md5(normalized.encode()).hexdigest()
-
-
-def _has_tomorrow_content(page_id: str) -> tuple[bool, str]:
-    """
-    Tomorrow / 내일 섹션에 실제 내용이 있는지 확인.
-    반환: (내용 있음 여부, 전체 content 문자열)
-    content도 같이 반환해서 호출 측에서 재사용 가능하게.
-    """
-    content = get_notion_content(page_id)
-    pattern = r'#+[^\n]*(?:Tomorrow|내일)[^\n]*\n(.*?)(?=\n#+|\Z)'
-    m = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
-    if m and m.group(1) and m.group(1).strip():
-        return True, content
-    return False, content
 
 
 def make_template():
