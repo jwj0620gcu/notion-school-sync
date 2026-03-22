@@ -28,24 +28,23 @@ export default function LoginPage() {
   };
 
   return (
-    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 20 }}>
-      <section className="card" style={{ width: "min(560px, 100%)" }}>
-        <span className="badge">Step 1. Web UI</span>
-        <h1 className="title" style={{ marginTop: 14 }}>
-          구글 계정으로 로그인
-        </h1>
-        <p className="subtitle">
-          로그인 후 API 키 입력 페이지와 동작 상태 대시보드를 사용할 수 있습니다.
+    <main className="hero-shell">
+      <section className="hero-content">
+        <h1 className="hero-title">한 번의 입력으로 수 많은 것을 누리세요.</h1>
+        <p className="hero-service">
+          <span className="hero-service-notion">NOTION</span>
+          <span className="hero-service-sep">-</span>
+          <span className="hero-service-snippet">DAILY SNIPPET</span>
+        </p>
+        <p className="hero-description">
+          노션에 기록한 하루를 자동으로 정리하고, 더 빠르고 쉽게 스니펫으로 연결하세요.
         </p>
 
-        <div style={{ marginTop: 24 }} className="stack">
-          <button className="button" onClick={onGoogleSignIn} disabled={loading}>
-            {loading ? "구글 로그인 이동 중..." : "Google로 로그인"}
+        <div className="hero-actions">
+          <button className="button hero-cta" onClick={onGoogleSignIn} disabled={loading}>
+            {loading ? "Google 로그인 이동 중..." : "구글 로그인"}
           </button>
           {error && <p className="error">{error}</p>}
-          <p className="muted">
-            Supabase Google OAuth가 먼저 설정되어 있어야 동작합니다.
-          </p>
         </div>
       </section>
     </main>

@@ -34,11 +34,14 @@ a {
 }
 
 .card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.66));
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  border-radius: 18px;
   padding: 24px;
-  box-shadow: 0 4px 28px rgba(8, 46, 53, 0.06);
+  backdrop-filter: blur(8px);
+  box-shadow:
+    0 14px 36px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .title {
@@ -68,12 +71,13 @@ a {
 }
 
 .button.secondary {
-  background: #e8f0f2;
-  color: var(--text);
+  background: rgba(238, 243, 247, 0.88);
+  border: 1px solid rgba(146, 161, 171, 0.3);
+  color: #15222d;
 }
 
 .button.secondary:hover {
-  background: #d8e4e8;
+  background: rgba(225, 234, 240, 0.94);
 }
 
 .stack {
@@ -121,8 +125,189 @@ a {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.app-shell {
+  min-height: 100vh;
+  padding: 28px 0 48px;
+}
+
+.app-header {
+  margin-bottom: 18px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.app-brand-wrap {
+  display: grid;
+  gap: 6px;
+}
+
+.app-brand {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+}
+
+.app-brand-notion,
+.app-brand-sep {
+  color: #101215;
+}
+
+.app-brand-snippet {
+  color: #e93895;
+}
+
+.app-nav {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.page-heading {
+  margin: 0;
+  padding: 4px 2px 2px;
+  font-size: 30px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.field-help {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: #607080;
+}
+
+.field-help a {
+  color: #2263a6;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 @media (max-width: 768px) {
   .grid-2 {
     grid-template-columns: 1fr;
+  }
+
+  .page-heading {
+    font-size: 26px;
+  }
+
+  .app-shell {
+    padding: 22px 0 36px;
+  }
+}
+
+.hero-shell {
+  position: relative;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 28px 20px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(68, 138, 255, 0.2) 0%, rgba(68, 138, 255, 0) 35%),
+    radial-gradient(circle at 82% 18%, rgba(15, 118, 110, 0.18) 0%, rgba(15, 118, 110, 0) 34%),
+    radial-gradient(circle at 50% 92%, rgba(255, 186, 104, 0.18) 0%, rgba(255, 186, 104, 0) 30%),
+    linear-gradient(180deg, #f7fafc 0%, #eef3f7 100%);
+}
+
+.hero-shell::before,
+.hero-shell::after {
+  content: "";
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(40px);
+  pointer-events: none;
+}
+
+.hero-shell::before {
+  width: 360px;
+  height: 360px;
+  top: -140px;
+  left: -110px;
+  background: rgba(66, 133, 244, 0.22);
+}
+
+.hero-shell::after {
+  width: 380px;
+  height: 380px;
+  right: -120px;
+  bottom: -160px;
+  background: rgba(52, 168, 83, 0.18);
+}
+
+.hero-content {
+  position: relative;
+  z-index: 1;
+  width: min(1120px, 94vw);
+  text-align: center;
+  padding: 36px 18px;
+}
+
+.hero-title {
+  margin: 0;
+  font-size: clamp(16px, 3.9vw, 56px);
+  line-height: 1.18;
+  letter-spacing: -0.03em;
+  color: #0b1725;
+  white-space: nowrap;
+  text-wrap: nowrap;
+}
+
+.hero-service {
+  margin: 16px 0 0;
+  font-size: clamp(24px, 3.7vw, 48px);
+  line-height: 1.2;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.hero-service-notion {
+  color: #101215;
+}
+
+.hero-service-sep {
+  color: #101215;
+  margin: 0 2px;
+}
+
+.hero-service-snippet {
+  color: #e93895;
+}
+
+.hero-description {
+  margin: 20px auto 0;
+  max-width: 740px;
+  font-size: clamp(15px, 1.55vw, 21px);
+  line-height: 1.65;
+  color: #344554;
+}
+
+.hero-actions {
+  margin-top: 34px;
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
+.hero-cta {
+  min-width: 210px;
+  border-radius: 13px;
+  padding: 13px 18px;
+  background: linear-gradient(135deg, #4285f4 0%, #0f766e 100%);
+  box-shadow: 0 12px 28px rgba(35, 94, 164, 0.25);
+}
+
+.hero-cta:hover {
+  background: linear-gradient(135deg, #2f6fd8 0%, #0b5f5a 100%);
+}
+
+@media (max-width: 860px) {
+  .hero-content {
+    width: min(100%, 680px);
+    padding: 20px 10px;
   }
 }
