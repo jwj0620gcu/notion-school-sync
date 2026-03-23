@@ -3,6 +3,18 @@
 > 노션에 일기를 쓰면, AI가 자동으로 정형화해서 1000.school에 제출합니다.
 > 매주·매달 AI 감독이 패턴을 분석해 리포트를 생성합니다.
 
+<div align="center">
+
+### 🚀 지금 바로 사용해보기
+
+[![서비스 바로가기](https://img.shields.io/badge/notion--school--sync-바로가기-black?style=for-the-badge&logo=vercel)](https://notion-school-sync.vercel.app/)
+
+<img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=https://notion-school-sync.vercel.app/&bgcolor=ffffff&color=000000&margin=10" alt="QR Code" width="180"/>
+
+**📱 QR 코드를 스캔하면 바로 접속됩니다**
+
+</div>
+
 ---
 
 ## 왜 만들었나
