@@ -75,7 +75,12 @@ def parse_iso(value):
         value = value[:-1] + "+00:00"
     return datetime.datetime.fromisoformat(value)
 
-page_id = main.find_today_child_page(os.environ["NOTION_PAGE_ID"])
+try:
+    page_id = main.find_today_child_page(os.environ["NOTION_PAGE_ID"])
+except Exception as exc:
+    print("__RESULT__" + json.dumps({"status": "notion_api_error", "error": str(exc)[:300]}))
+    raise SystemExit(0)
+
 if not page_id:
     now = datetime.datetime.now(KST)
     if now.hour >= DAY_START_HOUR:
