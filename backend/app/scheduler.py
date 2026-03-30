@@ -107,7 +107,12 @@ class SchedulerJobRunner:
                             payload["last_notion_sync_at"] = now
                     elif job_name == "weekly-report":
                         today = datetime.now(self._timezone).date()
-                        target_monday = today - timedelta(days=today.weekday() + 7)
+                        # 일요일(weekday=6) 20:30 실행: 이번 주 월요일 기준
+                        # 그 외(월요일 등 수동 실행): 지난 주 월요일 기준
+                        if today.weekday() == 6:
+                            target_monday = today - timedelta(days=6)
+                        else:
+                            target_monday = today - timedelta(days=today.weekday() + 7)
                         run_weekly_report(secrets, target_monday)
                         payload = {
                             "last_weekly_report_at": now,
@@ -165,9 +170,9 @@ def create_scheduler(timezone: str) -> tuple[AsyncIOScheduler, SchedulerJobRunne
     scheduler.add_job(
         runner.run_weekly_report,
         trigger="cron",
-        day_of_week="mon",
-        hour=9,
-        minute=0,
+        day_of_week="sun",
+        hour=20,
+        minute=30,
         id="weekly-report-all-users",
         replace_existing=True,
         coalesce=True,

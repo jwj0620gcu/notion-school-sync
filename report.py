@@ -685,9 +685,10 @@ def run_weekly(target_monday: date = None):
         target_monday = today - timedelta(days=today.weekday())  # 이번 주 월요일
 
     week_end = target_monday + timedelta(days=6)
-    yesterday = today - timedelta(days=1)
-    if week_end >= today:
-        week_end = yesterday  # 오늘은 아직 작성 중이므로 제외
+    # 일요일(주 마지막날) 20:30 실행 시 오늘(일요일) 포함
+    # 그 외 날짜에 실행 시 오늘은 아직 작성 중이므로 제외
+    if week_end > today:
+        week_end = today - timedelta(days=1)
 
     week_num  = target_monday.isocalendar()[1]
     year      = target_monday.year
